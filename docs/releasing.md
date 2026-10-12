@@ -104,7 +104,9 @@ nix run .#release -- publish --verified /tmp/verified-bindings.json \
 Production PyPI uses the same command with `--destination pypi` and a separate
 PyPI token. The publisher checks TestPyPI's recorded digests against every
 candidate wheel and performs a fresh installation/import check before production
-promotion. Do not rebuild or rename wheels between staging and promotion.
+promotion. That installation uses only TestPyPI, requires a candidate wheel hash,
+and ignores local uv configuration, extra indexes, caches, and Python import
+paths. Do not rebuild or rename wheels between staging and promotion.
 
 For Maven, `MAVEN_CENTRAL_TOKEN` is the Base64 encoding of the Central Portal
 token's `username:password`; keep it in the local environment. `GPG_KEY_ID` can
