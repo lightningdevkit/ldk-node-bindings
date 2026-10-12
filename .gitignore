@@ -1,0 +1,10 @@
+/target/
+/result*
+/.release/
+/.work/
+**/.gradle/
+**/build/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.DS_Store
