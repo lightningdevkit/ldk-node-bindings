@@ -746,6 +746,17 @@ printf 'test signature' > "$result"
 #[test]
 #[cfg(unix)]
 fn prepare_resumes_one_ci_run_without_any_publication() {
+    prepare_scenario("lightningdevkit/ldk-node-bindings");
+}
+
+#[test]
+#[cfg(unix)]
+fn prepare_prints_verification_for_the_selected_repository() {
+    prepare_scenario("tnull/ldk-node-bindings-test");
+}
+
+#[cfg(unix)]
+fn prepare_scenario(repo: &str) {
     let r = fixture();
     let candidate = build_candidate(&r);
     let bin = tempfile::tempdir().unwrap();
@@ -770,7 +781,7 @@ case "$1 $2" in
   'run list') if [ -e "$MOCK_DISPATCH" ]; then printf '[{"databaseId":123,"headSha":"%s","displayTitle":"candidate %s"}]' "$MOCK_RECIPE" "$MOCK_RECIPE"; else printf '[]'; fi;;
   'workflow run') touch "$MOCK_DISPATCH"; printf 'dispatch\n' >> "$MOCK_LOG";;
   'run watch') echo 'run watch does not support fine-grained PATs' >&2; exit 98;;
-  'api repos/lightningdevkit/ldk-node-bindings/actions/runs/123')
+  "api repos/$MOCK_REPO/actions/runs/123")
     if [ -e "$MOCK_RESULT" ]; then cat "$MOCK_RESULT"; else
       printf '{"head_sha":"%s","status":"completed","conclusion":"success","run_attempt":1}' "$MOCK_RECIPE"
     fi;;
@@ -791,7 +802,7 @@ cp "$MOCK_CANDIDATE/${last##*/}" "$result"
     let invoke = || {
         command(env!("CARGO_BIN_EXE_release"))
             .current_dir(r.dir.path())
-            .args(["prepare", "--repo", "lightningdevkit/ldk-node-bindings"])
+            .args(["prepare", "--repo", repo])
             .env(
                 "PATH",
                 format!(
@@ -803,6 +814,7 @@ cp "$MOCK_CANDIDATE/${last##*/}" "$result"
             .env("MOCK_LOG", bin.path().join("events"))
             .env("MOCK_DISPATCH", bin.path().join("dispatched"))
             .env("MOCK_RECIPE", &r.sha)
+            .env("MOCK_REPO", repo)
             .env("MOCK_RESULT", bin.path().join("result.json"))
             .env("MOCK_CANDIDATE", r.candidate.path())
             .output()
@@ -813,10 +825,19 @@ cp "$MOCK_CANDIDATE/${last##*/}" "$result"
     ok(result);
     let hash = manifest_sha(&r);
     assert!(stdout.contains(&format!("candidate.json SHA-256: {hash}")));
-    assert!(stdout.contains(&format!(
-        "./scripts/verify.sh {} {hash}",
+    let repo_option = if repo == "lightningdevkit/ldk-node-bindings" {
+        String::new()
+    } else {
+        format!(" --repo {repo}")
+    };
+    let verification = format!(
+        "./scripts/verify.sh {} {hash}{repo_option}",
         candidate["id"].as_str().unwrap()
-    )));
+    );
+    assert!(
+        stdout.contains(&verification),
+        "missing {verification}: {stdout}"
+    );
     let cache = r
         .dir
         .path()
@@ -1551,6 +1572,18 @@ fn entry_fixture() -> Repo {
 
 #[cfg(unix)]
 fn entry_run(r: &Repo, id: &str, sha: &str, output: &Path, group: Option<&str>) -> Output {
+    entry_run_repo(r, id, sha, output, group, None)
+}
+
+#[cfg(unix)]
+fn entry_run_repo(
+    r: &Repo,
+    id: &str,
+    sha: &str,
+    output: &Path,
+    group: Option<&str>,
+    repo: Option<&str>,
+) -> Output {
     let bin = tempfile::tempdir().unwrap();
     executable(
         &bin.path().join("docker"),
@@ -1577,7 +1610,7 @@ fn entry_run(r: &Repo, id: &str, sha: &str, output: &Path, group: Option<&str>) 
             &[
                 "update-ref",
                 "refs/heads/main",
-                &git(r.dir.path(), &["rev-parse", "HEAD^"]),
+                &git(r.dir.path(), &["rev-parse", &format!("{}^", r.sha)]),
             ],
         );
         if branch == "tag-only" {
@@ -1610,7 +1643,7 @@ case "$1" in
   fetch)
     [ -z "${{GH_TOKEN:-}}${{GITHUB_TOKEN:-}}${{GIT_CONFIG_PARAMETERS:-}}" ] || exit 91
     [ "$GIT_CONFIG_NOSYSTEM" = 1 ] && [ "$GIT_CONFIG_GLOBAL" = /dev/null ] && [ "$GIT_CONFIG_COUNT" = 0 ] && [ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 92
-    [ "$*" = "fetch --quiet --no-tags https://github.com/lightningdevkit/ldk-node-bindings.git +refs/heads/*:refs/remotes/reviewed/*" ] || exit 93
+    [ "$*" = "fetch --quiet --no-tags https://github.com/$MOCK_REPO.git +refs/heads/*:refs/remotes/reviewed/*" ] || exit 93
     touch "$MOCK_FETCHED"
     exec '{0}' fetch --quiet --no-tags "$MOCK_OFFICIAL" '+refs/heads/*:refs/remotes/reviewed/*';;
 esac
@@ -1629,7 +1662,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in --output) shift; destination=$1;; esac
   url=$1; shift
 done
-case "$url" in https://github.com/lightningdevkit/ldk-node-bindings/releases/download/candidate-*/*) ;; *) exit 97;; esac
+case "$url" in "https://github.com/$MOCK_REPO/releases/download/"candidate-*/*) ;; *) exit 97;; esac
 name=${url##*/}
 printf '%s\n' "$name" >> "$MOCK_DOWNLOADS"
 cp "$MOCK_CANDIDATE/$name" "$destination"
@@ -1651,6 +1684,10 @@ cp "$MOCK_CANDIDATE/$name" "$destination"
         .env("CONTAINER_ENGINE", bin.path().join("docker"))
         .env_remove("DOCKER_HOST")
         .env_remove("DOCKER_CONTEXT")
+        .env(
+            "MOCK_REPO",
+            repo.unwrap_or("lightningdevkit/ldk-node-bindings"),
+        )
         .env("MOCK_FETCHED", r.candidate.path().join("fetched"))
         .env("MOCK_OFFICIAL", official.path())
         .env("MOCK_DOWNLOADS", r.candidate.path().join("downloads"))
@@ -1658,6 +1695,9 @@ cp "$MOCK_CANDIDATE/$name" "$destination"
         .env("GITHUB_TOKEN", "must-not-be-used");
     if let Some(group) = group {
         cmd.args(["--group", group]);
+    }
+    if let Some(repo) = repo {
+        cmd.args(["--repo", repo]);
     }
     if r.candidate.path().join("inherit-repository").exists() {
         cmd.env("GIT_DIR", r.dir.path().join(".git"))
@@ -1671,6 +1711,105 @@ cp "$MOCK_CANDIDATE/$name" "$destination"
             );
     }
     cmd.output().unwrap()
+}
+
+#[test]
+#[cfg(unix)]
+fn entry_uses_selected_repository_assets_and_branch_history() {
+    let r = entry_fixture();
+    let c = build_candidate(&r);
+    git(
+        r.dir.path(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Descendant",
+        ],
+    );
+    fs::write(
+        r.candidate.path().join("official-commit"),
+        git(r.dir.path(), &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    for branch in ["main", "0.7.x", "2026-10-prepare"] {
+        let out = tempfile::tempdir().unwrap();
+        fs::write(r.candidate.path().join("official-branch"), branch).unwrap();
+        ok(entry_run_repo(
+            &r,
+            c["id"].as_str().unwrap(),
+            &manifest_sha(&r),
+            out.path(),
+            None,
+            Some("tnull/ldk-node-bindings-test"),
+        ));
+        assert_eq!(
+            git(&out.path().join("recipe"), &["rev-parse", "HEAD"]),
+            r.sha
+        );
+        assert!(out.path().join("receipts").is_dir());
+    }
+    for branch in [
+        "fork-only",
+        "tag-only",
+        "unreviewed-feature",
+        "0.bad.x",
+        "2026-1-prepare",
+    ] {
+        let out = tempfile::tempdir().unwrap();
+        fs::write(r.candidate.path().join("official-branch"), branch).unwrap();
+        fail(
+            entry_run_repo(
+                &r,
+                c["id"].as_str().unwrap(),
+                &manifest_sha(&r),
+                out.path(),
+                None,
+                Some("tnull/ldk-node-bindings-test"),
+            ),
+            "recipe is not reachable from an official release branch",
+        );
+        assert!(!out.path().join("receipts").exists());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn entry_rejects_malformed_repository_before_downloading() {
+    let r = entry_fixture();
+    let c = build_candidate(&r);
+    for (repo, error) in [
+        ("owner", "repository must be OWNER/REPO"),
+        ("owner/repo/extra", "repository must be OWNER/REPO"),
+        (
+            "https://github.com/owner/repo",
+            "repository must be OWNER/REPO",
+        ),
+        ("/repo", "unsafe filename or identifier"),
+        ("owner/", "unsafe filename or identifier"),
+        ("owner/..", "unsafe filename or identifier"),
+        ("owner/-repo", "unsafe filename or identifier"),
+        ("owner/repo?token=x", "unsafe filename or identifier"),
+    ] {
+        let out = tempfile::tempdir().unwrap();
+        fail(
+            entry_run_repo(
+                &r,
+                c["id"].as_str().unwrap(),
+                &manifest_sha(&r),
+                out.path(),
+                None,
+                Some(repo),
+            ),
+            error,
+        );
+        assert!(!r.candidate.path().join("downloads").exists());
+        assert!(!r.candidate.path().join("fetched").exists());
+    }
 }
 
 #[test]
@@ -1989,6 +2128,8 @@ fn verification_script_passes_arguments_and_preserves_exit_status() {
             "generated",
             "--output",
             "/tmp/output with spaces",
+            "--repo",
+            "tnull/ldk-node-bindings-test",
         ])
         .env("MOCK_ARGUMENTS", &args_file)
         .env(
@@ -2019,6 +2160,8 @@ fn verification_script_passes_arguments_and_preserves_exit_status() {
             "generated",
             "--output",
             "/tmp/output with spaces",
+            "--repo",
+            "tnull/ldk-node-bindings-test",
         ]
     );
 }
