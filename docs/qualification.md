@@ -132,13 +132,16 @@ the candidate AAR and its native payloads are unchanged.
 
 ## Remaining release qualification
 
-Before production publication, independently reproduce every group on its
-required host. The current candidate still needs native Linux x86_64, Linux
+Independent reproduction of every group provides complete reproducibility
+coverage. The test candidate above still lacks native Linux x86_64, Linux
 aarch64, and Darwin receipts from outside GitHub; its other groups have local
-reproduction evidence. Exercise consumer installation separately from checksum
-comparison. Live TestPyPI staging and Maven publication have not been exercised;
-registry credentials and namespace ownership remain unqualified. TestPyPI
-staging must pass before PyPI publication.
+reproduction evidence. The release workflow now permits optional receipts and
+records out-of-band confirmations during collection. Publication requires
+complete recorded coverage by default; proceeding with missing comparisons
+requires an explicit `--allow-unverified` choice. Exercise consumer installation
+separately from checksum comparison. Live TestPyPI staging and Maven publication
+have not been exercised; registry credentials and namespace ownership remain
+unqualified. TestPyPI staging must pass before PyPI publication.
 
 Repeat Android consumer qualification for each candidate, including a 16 KiB
 device and API 21–23 devices with the documented desugaring configuration.

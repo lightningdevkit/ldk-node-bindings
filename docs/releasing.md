@@ -41,7 +41,7 @@ identity; verification does not depend on the current contents of `main`.
 Use a separate worktree for each preparation, retaining its local `.release`
 ledger. The candidate workflow must exist on the default branch, but dispatch
 uses the selected dated recipe branch. Publication always needs a separate
-explicit local request for the verified candidate and its destinations.
+explicit local request for the candidate and its destinations.
 
 ## Preparation state
 
@@ -78,27 +78,57 @@ worktree (the full `recipe` commit in `candidate.json`) for both collection and
 publication. These entrypoints do not automatically switch recipes. Paths are
 relative to the calling directory within that worktree.
 
-Collect all six groups:
+Collect the CI-built candidate. Receipt files are optional: if a group has no
+receipt, collection asks whether its artifacts were independently rebuilt and
+compared on another host. Answering yes records an out-of-band confirmation
+bound to this candidate; it does not manufacture a rebuild receipt. No or blank
+leaves the group without recorded confirmation and still permits collection.
+Observing `VERIFICATION SUCCESSFUL` on another host does not require copying its
+files. Comparing hashes is equivalent only when one hash comes from an
+independent rebuild, rather than a second download of the same candidate.
 
 ```bash
 candidate_id=CANDIDATE_ID
 candidate_url="https://github.com/lightningdevkit/ldk-node-bindings/releases/tag/$candidate_id"
 ./scripts/collect.sh --candidate "$candidate_url" \
-  --receipts /tmp/accepted-receipts --output /tmp/verified-bindings.json
+  --output /tmp/collected-bindings.json
 ```
 
-The verified ledger binds the candidate ID, recipe, input identity, files, and
-receipt coverage. JVM dependencies also need their Linux and Darwin receipts.
-The complete Swift ZIP is a comparison target because SwiftPM checksums archive
-bytes, including container metadata.
+Add `--receipts DIR` to import selected trusted receipts; supplied receipts must
+still match the exact candidate, host, files, and JVM imports. Add
+`--non-interactive` to skip prompts, leaving missing evidence unconfirmed. EOF
+during a prompt aborts collection rather than treating it as an answer.
+`--require-verification` requires all six groups to have receipts or affirmative
+out-of-band confirmations. Store the collection ledger outside the receipt
+directory. It binds the candidate ID, manifest hash, recipe, input identity,
+receipts, and out-of-band confirmations. Publication reports all three coverage
+categories and requires every group to have a receipt or confirmation by default.
+
+JVM assembly covers assembly itself; Linux and Darwin groups cover its imported
+native payloads. The complete Swift ZIP is a comparison target because SwiftPM
+checksums archive bytes, including container metadata. All candidate files are
+downloaded and hash-checked regardless of the chosen verification coverage.
+
+For an older candidate, keep its exact clean recipe checkout and invoke the
+updated tools by path, for example `/path/to/updated-tools/scripts/collect.sh`.
+The wrappers preserve the caller's working directory, so newer release tooling
+can collect an existing candidate without rebuilding it or changing its recipe.
 
 ## Publication commands
 
 The publisher requires a specific candidate confirmation and rejects CI
-environments. It rechecks all candidate files against the verified ledger
+environments. It rechecks all candidate files against the collection ledger
 immediately before upload. Supply credentials locally through the indicated
 environment or credential store; do not place credential values in commands or
-logs. All destinations use existing verified candidate bytes.
+logs. All destinations use existing hash-checked candidate bytes. The canonical
+ledger option is `--collected`; `--verified` remains an alias for older commands.
+Every group must have a recorded receipt or out-of-band confirmation before
+publication. To deliberately publish with incomplete comparisons, add
+`--allow-unverified` to that invocation. It still validates supplied evidence and
+all artifact hashes. `--require-verification` explicitly selects the default and
+cannot be combined with the override. Receipt and manual coverage, unconfirmed
+groups, and the override choice are preserved for each attempt in publication
+state. Coverage is kept outside immutable Swift provenance.
 
 `scripts/collect.sh` and `scripts/publish.sh` launch the same pinned CLI as
 `nix run .#release -- collect` and `nix run .#release -- publish`, respectively.
@@ -107,15 +137,15 @@ destination; no script adds confirmation or publishes the remaining destinations
 
 | Destination | Local authentication | Result |
 | --- | --- | --- |
-| `testpypi` | `UV_PUBLISH_TOKEN` for TestPyPI | Stage the four verified wheels |
+| `testpypi` | `UV_PUBLISH_TOKEN` for TestPyPI | Stage the four candidate wheels |
 | `pypi` | `UV_PUBLISH_TOKEN` for PyPI | Publish wheels after the TestPyPI gate |
 | `maven` | `CENTRAL_TOKEN_USERNAME` and `CENTRAL_TOKEN_PASSWORD` (or `MAVEN_CENTRAL_TOKEN`), local GPG key | Sign, submit, validate, and publish the Maven bundle through the Central Portal API |
-| `swift` | `gh` authentication or `GH_TOKEN` for the Swift destination | Publish source, metadata, a version tag, and the verified ZIP to `ldk-node-swift` |
+| `swift` | `gh` authentication or `GH_TOKEN` for the Swift destination | Publish source, metadata, a version tag, and the candidate ZIP to `ldk-node-swift` |
 
 Example for an explicitly authorized TestPyPI upload:
 
 ```bash
-./scripts/publish.sh --verified /tmp/verified-bindings.json \
+./scripts/publish.sh --collected /tmp/collected-bindings.json \
   --candidate "$candidate_url" --destination testpypi \
   --confirm "$candidate_id"
 ```
@@ -130,7 +160,7 @@ paths. Do not rebuild or rename wheels between staging and promotion.
 For an explicitly authorized Maven publication:
 
 ```bash
-./scripts/publish.sh --verified /tmp/verified-bindings.json \
+./scripts/publish.sh --collected /tmp/collected-bindings.json \
   --candidate "$candidate_url" --destination maven \
   --confirm "$candidate_id"
 ```
@@ -145,26 +175,26 @@ or separate portal click is required. Verify the final API status before
 reporting Maven completion; resume an existing deployment after an interruption
 instead of uploading a replacement bundle.
 
-Swift publication uses a separate destination repository. Review the verified
-generated Swift wrapper, final archive URL/checksum, licenses, and provenance
+Swift publication uses a separate destination repository. Review the generated
+Swift wrapper, final archive URL/checksum, licenses, and provenance
 before authorizing publication. The local publisher creates their distribution
 commit and an independent `vVERSION` tag in `lightningdevkit/ldk-node-swift`, then
-publishes the unchanged verified XCFramework ZIP as that release's asset.
+publishes the unchanged candidate XCFramework ZIP as that release's asset.
 The distribution contains `Sources/LDKNode`, `Package.swift`, `LICENSE-APACHE`,
 `LICENSE-MIT`, and `release-provenance.json`. Provenance identifies the native
-source, bindings recipe, candidate, input identity, and verified archive hash.
+source, bindings recipe, candidate, input identity, and archive hash.
 Consumers use the Swift repository's SwiftPM URL and version tag; the native
 source tag and candidate prerelease tag have distinct roles.
 
 ```bash
-./scripts/publish.sh --verified /tmp/verified-bindings.json \
+./scripts/publish.sh --collected /tmp/collected-bindings.json \
   --candidate "$candidate_url" --destination swift \
   --repo lightningdevkit/ldk-node-swift --confirm "$candidate_id"
 ```
 
 The publisher clones the distribution repository, or initializes its empty Git
 remote, and pushes a dated metadata branch and immutable version tag. It uploads
-the verified archive to a draft destination release before publishing that
+the hash-checked archive to a draft destination release before publishing that
 release; inspect its recorded state before retrying an interrupted publication.
 
 `--repo` selects the Swift GitHub destination and defaults to
@@ -232,12 +262,24 @@ qualification checks. ELF inspection does not replace those tests.
 
 ## Resume and inspect
 
-Publication state is recorded next to the verified ledger as
-`publication-CANDIDATE_ID.json`. Keep the ledger, accepted receipts, and
-publication record together. A failed or interrupted upload may already have
+Publication state is recorded next to the collection ledger as
+`publication-CANDIDATE_ID.json`. Keep the collection ledger, any accepted receipts,
+and publication record together. You may re-collect the same candidate to add
+receipts or out-of-band confirmations before resuming, including Swift publication.
+The append-only `verification_history` records each destination invocation's
+coverage and override before contacting that destination. A destination's status
+references the history entry through its zero-based `verification_attempt`.
+History records attempts, not proof that an upload completed; use destination
+status and remote state to determine the outcome. Earlier entries and other
+destinations' status remain intact. Legacy global `verification` fields are
+retained as historical data; their destination and timing cannot be recovered.
+Swift provenance binds only candidate identity and artifacts. Older commits with
+an embedded coverage field are accepted with that historical field intact;
+resuming never rewrites metadata commits or moves tags.
+A failed or interrupted upload may already have
 changed the destination; inspect remote files/hashes and recorded status before
 retrying. Never replace an existing registry version, move a published tag, or
-upload newly built bytes under an old verified ledger.
+upload newly built bytes under an old collection ledger.
 
 Report exactly which destinations were staged, submitted, validated, or finally
 published. Candidate preparation, a successful hash comparison, and a TestPyPI

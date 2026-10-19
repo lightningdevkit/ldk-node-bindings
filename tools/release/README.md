@@ -1,7 +1,8 @@
 # Local release tool
 
-`release` orchestrates public candidates, independent rebuilds, accepted receipts,
-and explicit local publication. Run it from the clean bindings recipe checkout:
+`release` orchestrates public candidates, optional independent rebuilds and
+receipts, out-of-band comparisons, and explicit local publication. Run it from
+the clean bindings recipe checkout:
 
 ```sh
 nix run .#release -- --help
@@ -100,7 +101,30 @@ directly in its output directory; the simple entrypoint's layout is shown above.
 Receipts are claims from local independent rebuilds, not signatures or automatic
 trust decisions. A maintainer deliberately selects accepted receipts into the
 collection directory. Collection rejects host/group combinations that the build
-recipes do not support. Keep the resulting verified ledger outside that directory.
+recipes do not support. Keep the collection ledger outside that directory.
+
+`collect --candidate URL_OR_DIR --output FILE` does not require receipts. Add
+`--receipts DIR` for available evidence; each remaining group gets a y/n prompt
+asking whether its artifacts were independently rebuilt and compared elsewhere.
+Yes answers are recorded in `out_of_band_groups`, separately from actual receipts.
+No or blank leaves the group unconfirmed. EOF aborts without writing a ledger.
+`--non-interactive` skips prompts, while `--require-verification` requires every
+group to have either a receipt or an out-of-band confirmation.
+
+`publish --collected FILE ...` requires each group to have a receipt or out-of-band
+confirmation by default. `--allow-unverified` explicitly permits incomplete
+coverage for that invocation. It conflicts with `--require-verification`, which
+selects the default. Every attempt appends its destination, coverage, and override
+choice to `verification_history` before contacting the destination; destination
+statuses reference the relevant zero-based `verification_attempt`. Retries and
+other destinations preserve earlier evidence. Legacy global `verification` fields
+are retained without attributing them to earlier destinations. Swift provenance
+depends only on candidate identity, allowing upgrades and recollection to resume
+existing commits and tags. Historical embedded coverage is accepted unchanged.
+`--verified` remains a compatibility alias;
+schema-1 ledgers without the new optional confirmation field remain accepted.
+The scripts may be invoked by absolute path from an older candidate's exact clean
+recipe checkout, so existing candidates do not need new CI builds for tool updates.
 
 ## Local state and credentials
 
@@ -115,8 +139,8 @@ then renamed into place. On resumption, an incomplete older cache is repaired
 only when every existing file matches the downloaded candidate.
 
 Publication rejects CI environments and requires `--confirm CANDIDATE_ID`.
-It snapshots and rehashes the verified files, then records partial outcomes in
-`publication-CANDIDATE_ID.json` alongside the verified ledger. Keep this file for
+It snapshots and rehashes the candidate files, then records partial outcomes in
+`publication-CANDIDATE_ID.json` alongside the collection ledger. Keep this file for
 resuming the same command after interruptions.
 An operating-system file lock beside the ledger excludes simultaneous
 publication commands using that candidate ledger. It releases automatically
@@ -143,6 +167,8 @@ and must not be removed while a publisher is running. Use one ledger per candida
   Git hooks are disabled for generated distribution operations. Before pushing
   or resuming, the committed paths, regular-file modes, and exact blob bytes must
   match the verified inputs; a Git filter that changes them causes a failure.
+  The sole compatibility exception is a historical `verification` field in
+  provenance; candidate identity and all artifact fields must still match.
   Local Git authentication, author identity, and signing settings are preserved.
   Swift deployment minima come from the recipe's `deployment_targets`.
   `--swift-git-url` and `--swift-asset-base-url` configure source and asset

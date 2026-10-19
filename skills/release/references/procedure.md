@@ -62,27 +62,37 @@ The verifier rebuilds project outputs even when candidate files or Nix project
 outputs already exist. Tool/dependency caches are permitted. Keep failed-build
 evidence; do not edit receipt hashes, skip files, or relax equality checks.
 
-Provide receipts for `generated`, `linux-x86_64`, `linux-aarch64`, `android`,
+Verification may cover `generated`, `linux-x86_64`, `linux-aarch64`, `android`,
 `darwin`, and `jvm`. JVM assembly imports the four candidate native libraries
 and records their identities. Matching assembly alone does not establish that
 the imported libraries were independently rebuilt.
 
-Choose trusted receipts, place only those in a collection directory, and run
-`collect --candidate URL --receipts DIR --output VERIFIED_FILE`. It validates
-complete coverage, identities, dependencies, and the actual candidate files.
+Optionally choose trusted receipts and place only those in a collection directory.
+Run `collect --candidate URL --output COLLECTED_FILE`, adding `--receipts DIR`
+when available. Collection validates all candidate bytes and supplied receipts,
+then asks whether each remaining group's artifacts were independently rebuilt
+and compared elsewhere. Record yes answers as out-of-band confirmations, not
+synthetic receipts. No or blank answers leave the group unconfirmed. Use
+`--non-interactive` to skip prompts, or `--require-verification` to require every
+group to have either form of confirmation. Report all three categories.
 Consumer/platform test results should accompany the ledger even though they
 are distinct from hash equality.
 
 ## Publish
 
 Read [the release guide](../../../docs/releasing.md) for commands, credentials,
-TestPyPI requirements, Swift metadata, and recovery. Present the verified
-candidate and requested destinations before invoking the explicit publication
+TestPyPI requirements, Swift metadata, and recovery. Present the candidate,
+recorded verification coverage, and requested destinations before invoking the explicit publication
 gate in the skill. Reuse existing authorization for that exact publication;
 do not ask the user again when they already explicitly authorized it.
 
-Invoke each requested destination locally with the verified ledger and exact
-candidate confirmation. Upload existing verified files, never a rebuild. Treat
+Invoke each requested destination locally with `--collected COLLECTED_FILE` and
+the exact candidate confirmation. `--verified` remains a compatibility alias.
+Publication requires complete receipt or out-of-band coverage by default.
+Use `--allow-unverified` only for a maintainer's explicit choice to publish with
+missing comparisons. Each attempt preserves its coverage and override in the
+publication history; recollection does not change immutable Swift metadata.
+Upload existing candidate files, never a rebuild. Treat
 TestPyPI staging, Maven upload/validation, and Swift metadata commits as distinct
 from a completed production publication. Inspect remote state after errors and
 report partial completion precisely.

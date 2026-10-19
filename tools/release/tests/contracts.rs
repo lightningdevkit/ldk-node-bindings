@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 use std::{
     fs,
+    io::Write,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 use tempfile::TempDir;
 
@@ -204,6 +205,236 @@ fn candidate_and_complete_receipts_produce_ledger() {
 }
 
 #[test]
+fn optional_collection_accepts_no_rebuild_receipts() {
+    let r = fixture();
+    let c = build_candidate(&r);
+    let output = tempfile::tempdir().unwrap();
+    let ledger = output.path().join("collected.json");
+    let result = run(
+        r.dir.path(),
+        &[
+            "collect",
+            "--non-interactive",
+            "--candidate",
+            r.candidate.path().to_str().unwrap(),
+            "--output",
+            ledger.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "collection must accept a candidate without rebuild receipts: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report = String::from_utf8(result.stdout).unwrap();
+    assert!(report.contains("Independent rebuild receipts: none"));
+    assert!(report.contains("Groups without recorded confirmation: android, darwin, generated, jvm, linux-aarch64, linux-x86_64"));
+    let collected: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+    assert_eq!(collected["candidate_id"], c["id"]);
+    assert_eq!(collected["receipts"], json!([]));
+}
+
+#[test]
+fn optional_collection_preserves_partial_rebuild_evidence() {
+    let r = fixture();
+    let c = build_candidate(&r);
+    let accepted = receipts(&r, &c);
+    for group in c["groups"].as_object().unwrap().keys() {
+        if group != "jvm" {
+            fs::remove_file(accepted.path().join(format!("{group}.json"))).unwrap();
+        }
+    }
+    let output = tempfile::tempdir().unwrap();
+    let ledger = output.path().join("collected.json");
+    let result = run(
+        r.dir.path(),
+        &[
+            "collect",
+            "--non-interactive",
+            "--candidate",
+            r.candidate.path().to_str().unwrap(),
+            "--receipts",
+            accepted.path().to_str().unwrap(),
+            "--output",
+            ledger.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "collection must preserve a partial rebuild without claiming its native imports were rebuilt: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report = String::from_utf8(result.stdout).unwrap();
+    assert!(report.contains("Independent rebuild receipts: jvm"));
+    assert!(report.contains("Groups without recorded confirmation: android, darwin, generated, linux-aarch64, linux-x86_64"));
+    let collected: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+    assert_eq!(collected["receipts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        collected["receipts"][0]["imports"],
+        c["groups"]["jvm"]["imports"]
+    );
+}
+
+#[test]
+fn out_of_band_comparisons_are_prompted_and_recorded_separately() {
+    let r = fixture();
+    let c = build_candidate(&r);
+    let accepted = receipts(&r, &c);
+    // Keep real JVM evidence to prove only the other five groups are prompted.
+    for group in c["groups"].as_object().unwrap().keys() {
+        if group != "jvm" {
+            fs::remove_file(accepted.path().join(format!("{group}.json"))).unwrap();
+        }
+    }
+    let output = tempfile::tempdir().unwrap();
+    let ledger = output.path().join("collected.json");
+    let mut child = command(env!("CARGO_BIN_EXE_release"))
+        .current_dir(r.dir.path())
+        .args([
+            "collect",
+            "--candidate",
+            r.candidate.path().to_str().unwrap(),
+            "--receipts",
+            accepted.path().to_str().unwrap(),
+            "--output",
+            ledger.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // android=yes, darwin=no, generated=yes, linux-aarch64=default no, linux-x86_64=yes.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"maybe\ny\nn\nYES\n\nY\n")
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "out-of-band comparisons must be collected: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report = String::from_utf8(result.stdout).unwrap();
+    assert!(report.contains("Please answer y or n."));
+    for group in [
+        "android",
+        "darwin",
+        "generated",
+        "linux-aarch64",
+        "linux-x86_64",
+    ] {
+        assert!(report.contains(&format!(
+            "Have you independently rebuilt and compared all artifacts in {group} elsewhere? [y/N]"
+        )));
+    }
+    assert!(!report.contains("artifacts in jvm elsewhere?"));
+    let collected: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+    assert_eq!(collected["receipts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        collected["out_of_band_groups"],
+        json!(["android", "generated", "linux-x86_64"])
+    );
+    assert!(report.contains("Groups without recorded confirmation: darwin, linux-aarch64"));
+}
+
+#[test]
+fn out_of_band_prompt_eof_does_not_write_a_collection() {
+    let r = fixture();
+    build_candidate(&r);
+    let output = tempfile::tempdir().unwrap();
+    let ledger = output.path().join("collected.json");
+    fail(
+        run(
+            r.dir.path(),
+            &[
+                "collect",
+                "--candidate",
+                r.candidate.path().to_str().unwrap(),
+                "--output",
+                ledger.to_str().unwrap(),
+            ],
+        ),
+        "confirmation input ended",
+    );
+    assert!(
+        !ledger.exists(),
+        "EOF must not manufacture an out-of-band confirmation"
+    );
+}
+
+#[test]
+fn out_of_band_invalid_or_missing_confirmations_stop_strict_publication() {
+    let r = fixture();
+    let c = build_candidate(&r);
+    let accepted = receipts(&r, &c);
+    let output = tempfile::tempdir().unwrap();
+    let ledger = output.path().join("collected.json");
+    ok(run(
+        r.dir.path(),
+        &[
+            "collect",
+            "--candidate",
+            r.candidate.path().to_str().unwrap(),
+            "--receipts",
+            accepted.path().to_str().unwrap(),
+            "--output",
+            ledger.to_str().unwrap(),
+        ],
+    ));
+    let complete: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
+    for (keep_receipts, groups, expected) in [
+        (true, json!(["darwin"]), "duplicate verification group"),
+        (
+            false,
+            json!(["darwin", "darwin"]),
+            "duplicate verification group",
+        ),
+        (false, json!(["other"]), "unknown out-of-band group"),
+        (false, json!([]), "missing verification"),
+    ] {
+        let mut modified = complete.clone();
+        if !keep_receipts {
+            modified["receipts"] = json!([]);
+        }
+        modified["out_of_band_groups"] = groups;
+        write(&ledger, &modified);
+        for mode in ["--require-verification", "--allow-unverified"] {
+            if mode == "--allow-unverified" && expected == "missing verification" {
+                continue;
+            }
+            fail(
+                run(
+                    r.dir.path(),
+                    &[
+                        "publish",
+                        "--candidate",
+                        r.candidate.path().to_str().unwrap(),
+                        "--collected",
+                        ledger.to_str().unwrap(),
+                        mode,
+                        "--destination",
+                        "testpypi",
+                        "--confirm",
+                        c["id"].as_str().unwrap(),
+                    ],
+                ),
+                expected,
+            );
+        }
+    }
+    assert!(
+        !output
+            .path()
+            .join(format!("publication-{}.json", c["id"].as_str().unwrap()))
+            .exists(),
+        "invalid confirmations must fail before any publication state or upload"
+    );
+}
+
+#[test]
 fn collect_rejects_receipt_from_an_incompatible_host() {
     let r = fixture();
     let c = build_candidate(&r);
@@ -260,6 +491,8 @@ fn collector_rejects_missing_receipts_and_changed_bytes() {
             r.dir.path(),
             &[
                 "collect",
+                "--non-interactive",
+                "--require-verification",
                 "--candidate",
                 r.candidate.path().to_str().unwrap(),
                 "--receipts",
@@ -268,7 +501,7 @@ fn collector_rejects_missing_receipts_and_changed_bytes() {
                 out.to_str().unwrap(),
             ],
         ),
-        "missing receipt",
+        "missing verification",
     );
     fs::write(r.candidate.path().join("linux.whl"), "tampered").unwrap();
     fail(
@@ -429,6 +662,81 @@ fn publish_requires_local_explicit_candidate_confirmation() {
         .output()
         .unwrap();
     fail(output, "local machine");
+}
+
+#[test]
+fn review_publication_requires_coverage_before_destination_access() {
+    let r = fixture();
+    let c = build_candidate(&r);
+    let accepted = receipts(&r, &c);
+    let output = tempfile::tempdir().unwrap();
+    let ledger = output.path().join("collected.json");
+    ok(run(
+        r.dir.path(),
+        &[
+            "collect",
+            "--candidate",
+            r.candidate.path().to_str().unwrap(),
+            "--receipts",
+            accepted.path().to_str().unwrap(),
+            "--output",
+            ledger.to_str().unwrap(),
+        ],
+    ));
+    let complete: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    for program in ["curl", "gh", "uv", "gpg"] {
+        executable(
+            &bin.path().join(program),
+            "#!/bin/sh\ntouch \"$MOCK_CONTACTED\"\nexit 97\n",
+        );
+    }
+    for count in [0, 5] {
+        let mut incomplete = complete.clone();
+        incomplete["receipts"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(count);
+        write(&ledger, &incomplete);
+        for destination in ["testpypi", "pypi", "maven", "swift"] {
+            let result = command(env!("CARGO_BIN_EXE_release"))
+                .current_dir(r.dir.path())
+                .args([
+                    "publish",
+                    "--candidate",
+                    r.candidate.path().to_str().unwrap(),
+                    "--collected",
+                    ledger.to_str().unwrap(),
+                    "--destination",
+                    destination,
+                    "--confirm",
+                    c["id"].as_str().unwrap(),
+                ])
+                .env_remove("CI")
+                .env_remove("GITHUB_ACTIONS")
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.path().display(),
+                        std::env::var("PATH").unwrap()
+                    ),
+                )
+                .env("MOCK_CONTACTED", bin.path().join("contacted"))
+                .env("MAVEN_CENTRAL_TOKEN", "test")
+                .output()
+                .unwrap();
+            fail(result, "missing verification");
+        }
+    }
+    assert!(
+        !bin.path().join("contacted").exists(),
+        "incomplete coverage must fail before accessing destinations"
+    );
+    assert!(!output
+        .path()
+        .join(format!("publication-{}.json", c["id"].as_str().unwrap()))
+        .exists());
 }
 #[test]
 fn verify_requires_clean_exact_recipe() {
@@ -909,6 +1217,35 @@ cp "$MOCK_CANDIDATE/${last##*/}" "$result"
 #[test]
 #[cfg(unix)]
 fn testpypi_uploads_only_verified_wheels_and_reconciles() {
+    testpypi_publication_scenario("complete");
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_override_accepts_no_rebuild_receipts() {
+    testpypi_publication_scenario("none");
+}
+
+#[test]
+#[cfg(unix)]
+fn publication_override_accepts_partial_rebuild_receipts() {
+    testpypi_publication_scenario("partial");
+}
+
+#[test]
+#[cfg(unix)]
+fn out_of_band_comparisons_allow_strict_publication() {
+    testpypi_publication_scenario("out-of-band");
+}
+
+#[test]
+#[cfg(unix)]
+fn review_publication_retains_coverage_history() {
+    testpypi_publication_scenario("history");
+}
+
+#[cfg(unix)]
+fn testpypi_publication_scenario(coverage: &str) {
     let r = fixture();
     let c = build_candidate(&r);
     let accepted = receipts(&r, &c);
@@ -925,6 +1262,22 @@ fn testpypi_uploads_only_verified_wheels_and_reconciles() {
             ledger.to_str().unwrap(),
         ],
     ));
+    if !["complete", "history"].contains(&coverage) {
+        let mut collected: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
+        collected["receipts"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|receipt| coverage == "partial" && receipt["group"] == "jvm");
+        if coverage == "out-of-band" {
+            collected["out_of_band_groups"] =
+                json!(c["groups"].as_object().unwrap().keys().collect::<Vec<_>>());
+        }
+        write(&ledger, &collected);
+    } else {
+        let mut legacy: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("out_of_band_groups");
+        write(&ledger, &legacy);
+    }
     let bin = tempfile::tempdir().unwrap();
     let mut urls = vec![];
     for inv in c["groups"].as_object().unwrap().values() {
@@ -950,20 +1303,29 @@ printf '%s\n' "${last##*/}" >> "$MOCK_LOG"
 touch "$MOCK_UPLOADED"
 "##,
     );
-    let invoke = || {
+    let invoke = |destination: &str| {
         command(env!("CARGO_BIN_EXE_release"))
             .current_dir(r.dir.path())
             .args([
                 "publish",
                 "--candidate",
                 r.candidate.path().to_str().unwrap(),
-                "--verified",
+                if coverage == "out-of-band" {
+                    "--collected"
+                } else {
+                    "--verified"
+                },
                 ledger.to_str().unwrap(),
                 "--destination",
-                "testpypi",
+                destination,
                 "--confirm",
                 c["id"].as_str().unwrap(),
             ])
+            .args(if ["none", "partial"].contains(&coverage) {
+                vec!["--allow-unverified"]
+            } else {
+                vec![]
+            })
             .env_remove("CI")
             .env_remove("GITHUB_ACTIONS")
             .env(
@@ -981,8 +1343,95 @@ touch "$MOCK_UPLOADED"
             .output()
             .unwrap()
     };
-    ok(invoke());
-    ok(invoke());
+    let result = invoke("testpypi");
+    assert!(
+        result.status.success(),
+        "publication must accept {coverage} rebuild coverage: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    if coverage == "history" {
+        let mut collected: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
+        collected["receipts"] = json!([]);
+        collected["out_of_band_groups"] =
+            json!(c["groups"].as_object().unwrap().keys().collect::<Vec<_>>());
+        write(&ledger, &collected);
+    }
+    ok(invoke("testpypi"));
+    if coverage == "history" {
+        let state_path = accepted
+            .path()
+            .join(format!("publication-{}.json", c["id"].as_str().unwrap()));
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let history = state["verification_history"]
+            .as_array()
+            .expect("publication must retain coverage from both attempts");
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0]["verification"]["receipt_groups"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(
+            history[1]["verification"]["out_of_band_groups"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(state["destinations"]["testpypi"]["verification_attempt"], 1);
+        let prior_history = history.clone();
+        let prior_testpypi = state["destinations"]["testpypi"].clone();
+        // A pre-upgrade ledger may have a global coverage field and no history.
+        // Preserve that field without attributing it to a destination retroactively.
+        let legacy_coverage = json!({"receipt_groups":[],"out_of_band_groups":[],"unconfirmed_groups":c["groups"].as_object().unwrap().keys().collect::<Vec<_>>()});
+        state["verification"] = legacy_coverage.clone();
+        state["destinations"]["maven"] =
+            json!({"status":"uploaded","deployment_id":"deployment-123"});
+        write(&state_path, &state);
+        executable(
+            &bin.path().join("curl"),
+            "#!/bin/sh\ncat >/dev/null\nprintf '{\"deploymentState\":\"PUBLISHED\"}'\n",
+        );
+        let result = command(env!("CARGO_BIN_EXE_release"))
+            .current_dir(r.dir.path())
+            .args([
+                "publish",
+                "--candidate",
+                r.candidate.path().to_str().unwrap(),
+                "--collected",
+                ledger.to_str().unwrap(),
+                "--destination",
+                "maven",
+                "--confirm",
+                c["id"].as_str().unwrap(),
+            ])
+            .env_remove("CI")
+            .env_remove("GITHUB_ACTIONS")
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.path().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .env("MAVEN_CENTRAL_TOKEN", "test")
+            .output()
+            .unwrap();
+        ok(result);
+        let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            &state["verification_history"].as_array().unwrap()[..2],
+            prior_history.as_slice()
+        );
+        assert_eq!(state["verification_history"][2]["destination"], "maven");
+        assert_eq!(state["destinations"]["testpypi"], prior_testpypi);
+        assert_eq!(state["destinations"]["maven"]["verification_attempt"], 2);
+        assert_eq!(state["verification"], legacy_coverage);
+        return;
+    }
     let uploaded = fs::read_to_string(bin.path().join("events")).unwrap();
     let mut actual: Vec<_> = uploaded.lines().collect();
     actual.sort();
@@ -992,6 +1441,46 @@ touch "$MOCK_UPLOADED"
         .collect();
     expected.sort();
     assert_eq!(actual, expected);
+    let state: Value = serde_json::from_slice(
+        &fs::read(
+            accepted
+                .path()
+                .join(format!("publication-{}.json", c["id"].as_str().unwrap())),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let verified = match coverage {
+        "complete" => 6,
+        "partial" => 1,
+        _ => 0,
+    };
+    let history = state["verification_history"].as_array().unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0], history[1]);
+    assert_eq!(history[0]["destination"], "testpypi");
+    assert_eq!(
+        history[0]["allow_unverified"],
+        ["none", "partial"].contains(&coverage)
+    );
+    assert_eq!(state["destinations"]["testpypi"]["verification_attempt"], 1);
+    let recorded = &history[0]["verification"];
+    assert_eq!(
+        recorded["receipt_groups"].as_array().unwrap().len(),
+        verified
+    );
+    assert_eq!(
+        recorded["unconfirmed_groups"].as_array().unwrap().len(),
+        if coverage == "out-of-band" {
+            0
+        } else {
+            6 - verified
+        }
+    );
+    assert_eq!(
+        recorded["out_of_band_groups"].as_array().unwrap().len(),
+        if coverage == "out-of-band" { 6 } else { 0 }
+    );
 }
 
 #[test]
@@ -1182,6 +1671,31 @@ fn swift_does_not_overwrite_differing_draft_asset() {
     swift_publication_scenario("changed_asset");
 }
 
+#[test]
+#[cfg(unix)]
+fn review_swift_resumes_legacy_provenance() {
+    swift_publication_scenario("legacy_resume");
+}
+
+#[test]
+#[cfg(unix)]
+fn review_swift_reruns_legacy_publication() {
+    swift_publication_scenario("legacy_rerun");
+}
+
+#[test]
+#[cfg(unix)]
+fn review_swift_resumes_after_recollection() {
+    swift_publication_scenario("recollect");
+}
+
+#[test]
+#[cfg(unix)]
+fn review_swift_accepts_historical_coverage_without_changing_identity() {
+    swift_publication_scenario("coverage_resume");
+    swift_publication_scenario("tampered_provenance");
+}
+
 #[cfg(unix)]
 fn swift_publication_scenario(mode: &str) {
     let mut r = fixture();
@@ -1350,6 +1864,109 @@ esac
     if !["none", "hook"].contains(&mode) {
         fail(invoke(), "gh failed");
     }
+    let state_path = accepted
+        .path()
+        .join(format!("publication-{}.json", c["id"].as_str().unwrap()));
+    let mut pinned_commit = None;
+    if [
+        "legacy_resume",
+        "legacy_rerun",
+        "coverage_resume",
+        "tampered_provenance",
+    ]
+    .contains(&mode)
+    {
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let branch = state["destinations"]["swift"]["branch"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let checkout = tempfile::tempdir().unwrap();
+        git(
+            checkout.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        git(checkout.path(), &["checkout", &branch]);
+        let provenance_path = checkout.path().join("release-provenance.json");
+        let mut provenance: Value =
+            serde_json::from_slice(&fs::read(&provenance_path).unwrap()).unwrap();
+        if mode.starts_with("legacy_") {
+            provenance.as_object_mut().unwrap().remove("verification");
+            // This fixture represents an old publication ledger with no coverage.
+            state.as_object_mut().unwrap().remove("verification");
+            state
+                .as_object_mut()
+                .unwrap()
+                .remove("verification_history");
+            state["destinations"]["swift"]
+                .as_object_mut()
+                .unwrap()
+                .remove("verification_attempt");
+        } else {
+            provenance["verification"] = json!({"receipt_groups":[],"out_of_band_groups":[],"unconfirmed_groups":c["groups"].as_object().unwrap().keys().collect::<Vec<_>>()});
+        }
+        if mode == "tampered_provenance" {
+            provenance["native_rev"] = json!("0".repeat(40));
+        }
+        write(&provenance_path, &provenance);
+        git(checkout.path(), &["add", "release-provenance.json"]);
+        git(
+            checkout.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Historical provenance fixture",
+            ],
+        );
+        let commit = git(checkout.path(), &["rev-parse", "HEAD"]);
+        git(checkout.path(), &["push", "origin", &branch]);
+        state["destinations"]["swift"]["commit"] = json!(commit);
+        if mode == "legacy_rerun" {
+            git(
+                checkout.path(),
+                &["push", "origin", &format!("{commit}:refs/tags/v0.7.1")],
+            );
+            state["destinations"]["swift"]["status"] = json!("published");
+            executable(
+                &bin.path().join("curl"),
+                r##"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then shift; cp "$MOCK_CANDIDATE/LDKNodeFFI.xcframework.zip" "$1"; exit 0; fi
+  shift
+done
+printf '{"draft":false}\n200'
+"##,
+            );
+        }
+        write(&state_path, &state);
+        pinned_commit = Some(commit);
+    }
+    if ["recollect", "coverage_resume"].contains(&mode) {
+        let mut collected: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
+        collected["receipts"] = json!([]);
+        collected["out_of_band_groups"] =
+            json!(c["groups"].as_object().unwrap().keys().collect::<Vec<_>>());
+        write(&ledger, &collected);
+        if pinned_commit.is_none() {
+            let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            pinned_commit = Some(
+                state["destinations"]["swift"]["commit"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+    }
+    if mode == "tampered_provenance" {
+        fail(invoke(), "Swift distribution content differs");
+        assert!(git(remote.path(), &["tag", "--list", "v0.7.1"]).is_empty());
+        return;
+    }
     if mode == "changed_asset" {
         fs::write(bin.path().join("asset"), b"different remote asset").unwrap();
         fail(invoke(), "artifact differs");
@@ -1361,6 +1978,13 @@ esac
         return;
     }
     ok(invoke());
+    if let Some(commit) = pinned_commit {
+        assert_eq!(
+            git(remote.path(), &["rev-parse", "v0.7.1"]),
+            commit,
+            "resuming must preserve the original metadata commit"
+        );
+    }
     let files = git(remote.path(), &["ls-tree", "-r", "--name-only", "v0.7.1"]);
     assert_eq!(
         files.lines().collect::<Vec<_>>(),
@@ -1393,7 +2017,11 @@ esac
     assert_eq!(provenance["recipe"], r.sha);
     assert_eq!(
         fs::read_to_string(bin.path().join("events")).unwrap(),
-        "draft\nupload\npublish\n"
+        if mode == "legacy_rerun" {
+            "draft\n"
+        } else {
+            "draft\nupload\npublish\n"
+        }
     );
 }
 

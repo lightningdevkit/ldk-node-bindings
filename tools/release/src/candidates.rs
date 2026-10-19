@@ -525,34 +525,77 @@ fn report_groups(c: &Candidate, groups: &[&str]) {
             .join(", ")
     );
 }
-pub fn collect(root: &Path, source: &str, receipts: &Path, output: &Path) -> Result<()> {
+pub fn collect(
+    root: &Path,
+    source: &str,
+    receipts: Option<&Path>,
+    output: &Path,
+    non_interactive: bool,
+    require_verification: bool,
+) -> Result<()> {
     clean(root)?;
     let loaded = load(root, source)?;
     let c = &loaded.candidate;
+    let candidate_sha256 = hash_file(&loaded.dir.join("candidate.json"))?.sha256;
     let mut accepted = vec![];
-    for entry in fs::read_dir(receipts)? {
-        let path = entry?.path();
-        ensure!(
-            path.extension().and_then(|s| s.to_str()) == Some("json"),
-            "receipt directory contains a non-JSON file"
-        );
-        accepted.push(read_json::<Receipt>(&path)?);
+    if let Some(receipts) = receipts {
+        for entry in fs::read_dir(receipts)? {
+            let path = entry?.path();
+            ensure!(
+                path.extension().and_then(|s| s.to_str()) == Some("json"),
+                "receipt directory contains a non-JSON file"
+            );
+            accepted.push(read_json::<Receipt>(&path)?);
+        }
     }
     accepted.sort_by(|a, b| a.group.cmp(&b.group));
-    validate_receipts(c, &accepted)?;
+    let mut out_of_band_groups = vec![];
+    let coverage = validate_verification(c, &accepted, &out_of_band_groups, false)?;
+    if !non_interactive {
+        println!(
+            "Candidate: {}\nManifest SHA-256: {}",
+            c.id, candidate_sha256
+        );
+        for group in &coverage.unconfirmed_groups {
+            if confirm_out_of_band(group)? {
+                out_of_band_groups.push(group.clone());
+            }
+        }
+    }
+    let coverage = validate_verification(c, &accepted, &out_of_band_groups, require_verification)?;
     write_json(
         output,
-        &Verified {
+        &Collected {
             schema: 1,
             candidate_id: c.id.clone(),
-            candidate_sha256: hash_file(&loaded.dir.join("candidate.json"))?.sha256,
+            candidate_sha256,
             recipe: c.recipe.clone(),
             inputs_sha256: c.inputs_sha256.clone(),
             receipts: accepted,
+            out_of_band_groups,
         },
     )?;
-    println!("Complete independent coverage accepted for {}", c.id);
+    println!("Collected candidate {}", c.id);
+    coverage.report();
     Ok(())
+}
+
+fn confirm_out_of_band(group: &str) -> Result<bool> {
+    use std::io::{self, Write};
+    loop {
+        print!("Have you independently rebuilt and compared all artifacts in {group} elsewhere? [y/N] ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        ensure!(
+            io::stdin().read_line(&mut answer)? != 0,
+            "confirmation input ended; use --non-interactive to collect without prompts"
+        );
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "" | "n" | "no" => return Ok(false),
+            _ => println!("Please answer y or n."),
+        }
+    }
 }
 
 #[cfg(test)]

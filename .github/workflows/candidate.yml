@@ -184,8 +184,9 @@ jobs:
 
           ./scripts/verify.sh $candidate_id $manifest_sha256 --repo "$GITHUB_REPOSITORY"
 
-          Checksums record transport integrity; independent receipts are
-          required before a maintainer can publish these bytes locally.
+          Checksums record transport integrity. Maintainers may record optional
+          rebuild receipts or confirm comparisons performed out-of-band during
+          collection before explicitly publishing these bytes locally.
 
           Build: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF

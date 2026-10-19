@@ -32,8 +32,8 @@ group from committed inputs into an empty output directory. It runs the same
 Nix derivations or pinned external recipes in CI and locally. No credentials,
 signing, publication, source mutation, or dependency updates occur here.
 `--candidate` is required only for JVM assembly, supplying the four named JVM
-native assets. Acceptance of this assembly for final publication requires their
-independent verification; CI can assemble the initial candidate beforehand.
+native assets. Reproducing this assembly establishes assembly equality; the
+imported libraries have their own Linux and Darwin verification groups.
 Generated sources and all project intermediate outputs must rebuild locally
 during verification, even if already present in a Nix store or build cache.
 
@@ -61,12 +61,32 @@ Rust workspace exposes `release` via `nix run .#release -- COMMAND ...`.
 - `verify --candidate URL_OR_DIR --group GROUP --output DIR`: anonymous download,
   independent rebuild, byte comparison, JSON receipt, and explicit partial
   coverage. Require the local clean recipe commit and input identity to match.
-- `collect --candidate URL_OR_DIR --receipts DIR --output FILE`: rehash actual
-  candidate files, require all groups and accepted independent receipts,
-  validate receipt hosts and JVM native dependencies, emit a verified ledger.
+- `collect --candidate URL_OR_DIR [--receipts DIR] --output FILE
+  [--non-interactive] [--require-verification]`: rehash all candidate files,
+  validate supplied receipt identities, hosts, files, and JVM imports, then
+  prompt y/n for every group without a receipt. Store affirmative answers in
+  `out_of_band_groups`, separately from `receipts`. No or blank answers leave
+  the group unconfirmed; EOF fails instead of inventing an answer. Emit a
+  collection ledger bound to the candidate manifest hash and recipe.
+  `--non-interactive` skips prompts and records no additional comparisons.
+  `--require-verification` requires every group to have a receipt or confirmation.
   `scripts/collect.sh` exposes the same options through pinned Nix tools.
-- `publish --verified FILE --candidate URL_OR_DIR --destination DEST
-  --confirm CANDIDATE_ID`: local-only final publication of verified bytes.
+- `publish --collected FILE --candidate URL_OR_DIR --destination DEST
+  --confirm CANDIDATE_ID [--allow-unverified]`: local-only final publication
+  of candidate bytes. `--verified FILE` remains an alias for old commands.
+  Receipts are optional, but every group must have a receipt or out-of-band
+  confirmation by default. `--allow-unverified` explicitly permits missing
+  coverage for this invocation; it conflicts with `--require-verification`,
+  which selects the default. Validate each confirmation group and reject
+  duplicate/foreign claims even with the override. Before accessing a destination,
+  append its receipt, out-of-band, and unconfirmed groups and override choice to
+  publication `verification_history`. Each destination status references its
+  zero-based `verification_attempt`; retries never rewrite history. Preserve old
+  global `verification` fields without attributing them to earlier destinations.
+  Swift provenance contains candidate identity only, so recollection does not
+  change the metadata commit. Existing provenance with a historical `verification`
+  field remains accepted without relaxing any candidate identity or artifact check.
+  Old schema-1 ledgers without `out_of_band_groups` remain valid.
   Destinations: `testpypi`, `pypi`, `maven`, `swift`. Reject CI environments.
   `scripts/publish.sh` exposes the same options and requires the same explicit
   confirmation. Collection/publication wrappers preserve the caller's working
@@ -82,7 +102,7 @@ The initial build/candidate repository is
 `https://github.com/lightningdevkit/ldk-node-bindings`. SwiftPM distribution is
 published separately to `https://github.com/lightningdevkit/ldk-node-swift`.
 Its version commits contain the generated Swift wrapper, `Package.swift`,
-licenses, and provenance; its release assets contain the unchanged verified
+licenses, and provenance; its release assets contain the unchanged candidate
 XCFramework ZIP. The package manifest points at that ZIP with its SHA-256.
 Keep the distribution Git URL and asset destination configurable for a possible
 Forgejo migration. The initial publication adapter supports GitHub; neither
@@ -97,7 +117,7 @@ reproducible payloads. Final uploads rehash files again; publication records
 support checking remote state and resuming without overwriting versions.
 
 Maven publication uses the Central Portal Publisher API from the local CLI.
-Sign the verified unsigned artifacts locally, assemble the repository-layout
+Sign the hash-checked unsigned candidate artifacts locally, assemble the repository-layout
 bundle, upload with `publishingType=USER_MANAGED`, persist the deployment ID,
 and poll validation. The explicitly confirmed publish invocation may then
 publish a validated deployment and poll its final state. Keep the Portal token

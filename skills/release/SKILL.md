@@ -60,11 +60,21 @@ signing keys to CI; CI upload uses its own temporary repository token.
 Anyone may run `scripts/verify.sh CANDIDATE_ID MANIFEST_SHA256` anonymously on a
 compatible host. Share the SHA-256 of `candidate.json` with the candidate ID.
 The script selects the exact recipe and the host's supported groups. It independently
-rebuilds and compares exact candidate bytes, then emits a receipt. Require every
-group, including generated sources and JVM assembly. Darwin receipts establish
-the imported Mac native payloads; no manual Mac binary copy is required for
-publication. Accept receipts deliberately before `collect`; a matching download
-checksum is not evidence of reproduction.
+rebuilds and compares exact candidate bytes, then emits a receipt. Receipts are
+optional: maintainers may observe successful verification on other hosts without
+copying their files. `collect` asks y/n for each group without a receipt and records
+affirmative answers as out-of-band comparisons, separately from rebuild receipts.
+A negative or blank answer leaves the group unconfirmed and still permits
+collection. `--non-interactive` skips those prompts; collection's
+`--require-verification` requires every group to have a receipt or an out-of-band
+confirmation. Publication requires this complete coverage by default. Only pass
+`--allow-unverified` when the maintainer explicitly chooses publication with
+missing comparisons; it does not waive validation of supplied evidence or hashes.
+Keep these choices explicit in reports; a missing receipt does not
+mean no comparison occurred. JVM assembly confirmation covers assembly only;
+the Linux and Darwin groups account for the imported native payloads.
+No manual Mac binary copy is required. Accept receipts deliberately before
+`collect`; a downloaded checksum alone is not evidence of reproduction.
 
 Preparation ends with candidate links and identities, verification commands,
 coverage status, checks completed, and any concrete outstanding requirements.
@@ -77,15 +87,20 @@ release. Preserve the local ledger so work can resume on the same candidate.
 identifying the candidate and destinations.** A request to prepare, verify,
 collect, or implement release tooling does not authorize final publication.
 When that authorization is absent, finish the reviewable preparation first,
-then present the exact candidate, verified hashes, destinations, and command.
+then present the exact candidate, artifact hashes, recorded verification
+coverage, destinations, and command.
 Name this instruction if it is why publication is waiting.
 
-`publish --confirm CANDIDATE_ID` runs locally, rechecks verified files, and uploads
-those same bytes. Add Maven signatures locally after verification. Use TestPyPI
-validation before PyPI promotion. For Swift, review the verified wrapper,
+`publish --collected FILE --confirm CANDIDATE_ID` runs locally, rechecks candidate
+files, and uploads those same bytes. Each publication attempt preserves its
+coverage and override in local publication history. Swift provenance binds only
+candidate identity, so adding evidence does not prevent resuming an existing
+metadata commit. Add Maven signatures locally after candidate
+hash checks. Use TestPyPI
+validation before PyPI promotion. For Swift, review the generated wrapper,
 `Package.swift` archive URL/checksum, licenses, and provenance before publishing
 them as a commit/tag in the separate Swift distribution repository. Attach the
-unchanged verified XCFramework ZIP there. The Swift destination does not rebuild
+unchanged candidate XCFramework ZIP there. The Swift destination does not rebuild
 it or own the candidate CI pipeline. Read the release guide for configurable
 destination options and the current GitHub adapter boundary.
 

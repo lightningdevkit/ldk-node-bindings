@@ -5,9 +5,11 @@ distributions of [LDK Node](https://github.com/lightningdevkit/ldk-node).
 
 GitHub runners build unsigned candidates. Anyone can download those candidates,
 rebuild their supported targets, and compare the exact package bytes without
-GitHub credentials. A maintainer publishes the verified files through a separate
-local command. Registry credentials, signing keys, and personal access tokens
-stay on the maintainer's machine.
+GitHub credentials. A maintainer collects and publishes the CI-built files through
+separate local commands. Rebuild receipts are optional; collection can record
+comparisons performed on other hosts without copying their receipts. Registry
+credentials, signing keys, and personal access tokens stay on the maintainer's
+machine.
 
 `release.json` selects the native revision, bindings version, and toolchain.
 Rust source, the authoritative UDL, native tags, and crates.io publication remain
@@ -77,8 +79,8 @@ output belongs in disposable directories under `/tmp`.
 | `jvm` | Linux x86_64 or aarch64 | JAR with all four native libraries and unsigned Maven files |
 
 JVM assembly takes `--candidate DIR` containing the native outputs. Assembly
-verification records their hashes; the complete release also needs independent
-verification of the Linux and Darwin groups. Python wheels support Python 3.10
+verification records their hashes; independent verification of those payloads
+belongs to the Linux and Darwin groups. Python wheels support Python 3.10
 and newer on Linux x86_64/aarch64 and macOS x86_64/arm64.
 
 ## Prepare a candidate
@@ -216,19 +218,27 @@ and writes a receipt identifying the recipe, inputs, group, files, and hashes.
 Verifying a downloaded checksum alone is transport validation; it does not
 establish that a build reproduced the candidate.
 
-Send the small receipts to the publishing maintainer. After deliberately
-selecting the receipts to trust, collect complete coverage:
+Rebuild receipts can be sent to the publishing maintainer, but copying them is
+optional. A maintainer can instead observe `VERIFICATION SUCCESSFUL` on each
+host or compare independently rebuilt hashes. Collection asks y/n for every
+group without a supplied receipt and records yes answers as out-of-band
+comparisons. No or blank leaves a group unconfirmed; collection still succeeds.
+
+Collect the candidate, optionally supplying a directory of trusted receipts:
 
 ```bash
 ./scripts/collect.sh --candidate "$candidate_url" \
-  --receipts /tmp/accepted-receipts --output /tmp/verified-bindings.json
+  --output /tmp/collected-bindings.json
 ```
 
-The collector checks the actual candidate files against those receipts. Missing
-targets, incompatible receipt hosts, different recipes, altered files, or unverified JVM dependencies prevent
+Add `--receipts /tmp/accepted-receipts` to import available receipts. Use
+`--non-interactive` to skip prompts or `--require-verification` to require every
+group to have a receipt or an out-of-band confirmation. These options never
+skip artifact hashing or validation of supplied evidence. Incompatible receipt
+hosts, different recipes, altered files, or mismatched JVM imports prevent
 collection. See [release operation](docs/releasing.md) for the local publication
 commands and recovery rules. Explicit local Swift publication sends the
-verified generated wrapper, `Package.swift`, licenses, provenance, and unchanged
+generated wrapper, `Package.swift`, licenses, provenance, and unchanged
 XCFramework ZIP to `lightningdevkit/ldk-node-swift`; its version tag belongs to
 that distribution repository.
 
@@ -241,15 +251,15 @@ the pinned Nix release tool and accept its existing options; they preserve
 relative paths and do not select a different recipe checkout. Run either with
 `--help` for the full interface.
 
-After collecting complete verification coverage, explicitly publish one
-destination with credentials supplied through your local environment or
+After collecting the candidate and reviewing its recorded coverage, explicitly
+publish one destination with credentials supplied through your local environment or
 credential store:
 
 ```bash
 candidate_id=CANDIDATE_ID
 candidate_url="https://github.com/lightningdevkit/ldk-node-bindings/releases/tag/$candidate_id"
 ./scripts/publish.sh --candidate "$candidate_url" \
-  --verified /tmp/verified-bindings.json --destination maven \
+  --collected /tmp/collected-bindings.json --destination maven \
   --confirm "$candidate_id"
 ```
 
@@ -257,18 +267,26 @@ Choose `testpypi`, `pypi`, `maven`, or `swift`. PyPI requires the identical whee
 to pass the TestPyPI gate first. Swift defaults to `lightningdevkit/ldk-node-swift`;
 `--repo` changes that publication destination. The candidate URL independently
 selects the build repository, including a test repository. Publication requires
-the verified ledger and exact candidate confirmation, rejects CI, and reuses the
+the collection ledger and exact candidate confirmation, rejects CI, and reuses the
 existing publication record when resumed. See [the release guide](docs/releasing.md)
 for each destination's credentials, qualification requirements, and recovery.
+Publication requires every group to have a receipt or an out-of-band confirmation
+by default and rechecks all artifact bytes. To deliberately publish with missing
+comparisons, pass `--allow-unverified` to that publication command. Each attempt
+records its coverage and override in publication history. `--require-verification`
+explicitly selects the default and conflicts with the override. `--verified`
+remains an alias for `--collected` for existing commands.
 
 ## Verification status
 
 Pinned environments and normalized archives are the basis for reproducible
 builds; they do not prove equality by themselves. Every platform requires a
-successful CI build and independent local comparison before production use.
+successful CI build; independent comparisons can be performed on any supported
+host and confirmed during collection. Missing receipts are not proof that a
+comparison did not occur, and checksums alone do not prove independent rebuilding.
 See [qualification evidence](docs/qualification.md) for checks actually run and
-outstanding platform validation. macOS recipes are supported but still require
-execution and comparison on the selected Apple host before publication.
+outstanding platform validation. macOS builds and native verification require
+the selected Apple host.
 Development checks alone do not imply
 that a release has been built, independently reproduced, or published.
 
