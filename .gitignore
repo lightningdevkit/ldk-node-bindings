@@ -1,4 +1,5 @@
 /target/
+/.codex/
 /result*
 /.release/
 /.work/
