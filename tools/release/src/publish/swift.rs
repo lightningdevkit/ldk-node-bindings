@@ -142,7 +142,7 @@ pub(super) fn publish(
             add.current_dir(&tree).arg("add").args(desired.keys());
             run(&mut add)?;
             let message = work.path().join("message");
-            fs::write(&message,"Publish verified Swift package metadata\n\nSwift consumers need a version tag containing generated bindings and a\nchecksum for the independently reproduced framework.\n\nPublish the matching source, licenses, and provenance in the Swift\ndistribution repository before creating its immutable version tag.\n")?;
+            fs::write(&message,"Publish Swift package metadata\n\nSwift consumers need a version tag containing generated bindings and a\nchecksum for the CI-built framework.\n\nPublish the matching source, licenses, and provenance in the Swift\ndistribution repository before creating its immutable version tag.\n")?;
             run(git_command()
                 .current_dir(&tree)
                 .args(["commit", "--file"])
@@ -197,11 +197,11 @@ pub(super) fn publish(
             &commit,
             "--title",
             &format!("LDK Node {version}"),
-                "--notes",
-                &format!(
-                    "Bindings version: {version}\nNative revision: {}\nBuild recipe: {}\nVerified candidate: {}",
-                    session.candidate.native_rev, session.candidate.recipe, session.candidate.id
-                ),
+            "--notes",
+            &format!(
+                "Bindings version: {version}\nNative revision: {}\nBuild recipe: {}\nCandidate: {}",
+                session.candidate.native_rev, session.candidate.recipe, session.candidate.id
+            ),
         ]))?;
     }
     let draft: Value = serde_json::from_str(&output(Command::new("gh").args([
@@ -289,6 +289,8 @@ fn distribution_files(
         source.status.success() && !source.stdout.is_empty(),
         "cannot read generated Swift wrapper"
     );
+    // Verification can grow after a release begins. Keep it in publication
+    // history so immutable distribution metadata depends only on the candidate.
     let provenance = json!({"schema":1,"candidate_id":session.candidate.id,"recipe":session.candidate.recipe,"native_rev":session.candidate.native_rev,"inputs_sha256":session.candidate.inputs_sha256,"candidate_sha256":session.state.candidate_sha256,"framework":zip,"swift_source_sha256":digest(&source.stdout)});
     let mut files = BTreeMap::new();
     files.insert("Sources/LDKNode/LDKNode.swift".into(), source.stdout);
@@ -327,11 +329,30 @@ fn assert_distribution(tree: &Path, desired: &BTreeMap<String, Vec<u8>>) -> Resu
             .args(["cat-file", "blob", &format!("HEAD:{name}")])
             .output()?;
         ensure!(
-            blob.status.success() && blob.stdout == *bytes,
+            blob.status.success() && distribution_matches(name, &blob.stdout, bytes)?,
             "existing Swift distribution content differs: {name}"
         );
     }
     Ok(())
+}
+fn distribution_matches(name: &str, actual: &[u8], expected: &[u8]) -> Result<bool> {
+    if actual == expected {
+        return Ok(true);
+    }
+    if name != "release-provenance.json" {
+        return Ok(false);
+    }
+    // Accept the earlier optional-receipt tool's coverage field as historical
+    // evidence. Never rewrite its commit, or ignore any candidate identity field.
+    let mut provenance: Value = serde_json::from_slice(actual)?;
+    let Some(coverage) = provenance
+        .as_object_mut()
+        .and_then(|object| object.remove("verification"))
+    else {
+        return Ok(false);
+    };
+    serde_json::from_value::<Option<VerificationCoverage>>(coverage)?;
+    Ok(serde_json::to_vec_pretty(&provenance)? == expected)
 }
 fn package(url: &str, checksum: &str, targets: &DeploymentTargets) -> String {
     let DeploymentTargets {

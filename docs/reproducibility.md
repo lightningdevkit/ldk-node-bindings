@@ -76,9 +76,10 @@ this maintenance command.
 
 A JVM JAR contains Linux and Darwin native libraries. Linux can reproduce the
 JAR assembly using candidate Darwin inputs, but that receipt proves only the
-assembly and its recorded dependencies. The collector also requires receipts
-for the independently rebuilt Darwin group and Linux native output. Otherwise
-an unchanged imported binary could be mistaken for a locally verified binary.
+assembly and its recorded dependencies. Darwin and Linux native comparisons
+are separate groups. Collection records rebuild receipts, manual out-of-band
+confirmations, and groups without recorded confirmation separately. An imported
+binary does not become independently verified merely because assembly matched.
 
 Receipts are assertions by the machines/operators that made them. The maintainer
 selects the receipts to accept; the collector checks their consistency and file

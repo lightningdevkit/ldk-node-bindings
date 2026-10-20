@@ -105,13 +105,44 @@ pub struct Receipt {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Verified {
+pub struct Collected {
     pub schema: u32,
     pub candidate_id: String,
     pub candidate_sha256: String,
     pub recipe: String,
     pub inputs_sha256: String,
     pub receipts: Vec<Receipt>,
+    #[serde(default)]
+    pub out_of_band_groups: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationCoverage {
+    pub receipt_groups: Vec<String>,
+    pub out_of_band_groups: Vec<String>,
+    pub unconfirmed_groups: Vec<String>,
+}
+impl VerificationCoverage {
+    pub fn report(&self) {
+        for (label, groups) in [
+            ("Independent rebuild receipts", &self.receipt_groups),
+            ("Compared out-of-band", &self.out_of_band_groups),
+            (
+                "Groups without recorded confirmation",
+                &self.unconfirmed_groups,
+            ),
+        ] {
+            println!(
+                "{label}: {}",
+                if groups.is_empty() {
+                    "none".into()
+                } else {
+                    groups.join(", ")
+                }
+            );
+        }
+    }
 }
 
 pub fn safe_name(s: &str) -> Result<()> {
@@ -316,7 +347,12 @@ pub fn native_records(c: &Candidate) -> Result<Vec<FileRecord>> {
         })
         .collect()
 }
-pub fn validate_receipts(c: &Candidate, receipts: &[Receipt]) -> Result<()> {
+pub fn validate_verification(
+    c: &Candidate,
+    receipts: &[Receipt],
+    out_of_band_groups: &[String],
+    require_complete: bool,
+) -> Result<VerificationCoverage> {
     let mut seen = BTreeSet::new();
     for r in receipts {
         ensure!(
@@ -338,22 +374,35 @@ pub fn validate_receipts(c: &Candidate, receipts: &[Receipt]) -> Result<()> {
         ensure!(r.files == inv.files, "receipt files differ");
         ensure!(r.imports == inv.imports, "JVM imports differ in receipt");
     }
-    for group in c.groups.keys() {
-        if !seen.contains(group) {
-            bail!("missing receipt for {group}");
-        }
-    }
-    for native in native_records(c)? {
+    let receipt_groups = seen.iter().cloned().collect();
+    for group in out_of_band_groups {
         ensure!(
-            receipts
-                .iter()
-                .filter(|r| r.group != "jvm")
-                .flat_map(|r| &r.files)
-                .any(|f| *f == native),
-            "JVM imports require independent native receipts"
+            c.groups.contains_key(group),
+            "unknown out-of-band group: {group}"
+        );
+        ensure!(
+            seen.insert(group.clone()),
+            "duplicate verification group: {group}"
         );
     }
-    Ok(())
+    let unconfirmed_groups: Vec<_> = c
+        .groups
+        .keys()
+        .filter(|group| !seen.contains(*group))
+        .cloned()
+        .collect();
+    if require_complete {
+        if let Some(group) = unconfirmed_groups.first() {
+            bail!("missing verification for {group}");
+        }
+    }
+    let mut out_of_band_groups = out_of_band_groups.to_vec();
+    out_of_band_groups.sort();
+    Ok(VerificationCoverage {
+        receipt_groups,
+        out_of_band_groups,
+        unconfirmed_groups,
+    })
 }
 
 #[cfg(test)]

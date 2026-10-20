@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
-    about = "Rebuild public binding candidates and publish verified bytes locally",
+    about = "Collect, independently verify, and locally publish binding candidates",
     version
 )]
 struct Cli {
@@ -72,14 +72,28 @@ enum Commands {
     Collect {
         #[arg(long)]
         candidate: String,
+        /// Optional directory containing trusted independent rebuild receipts.
         #[arg(long)]
-        receipts: PathBuf,
+        receipts: Option<PathBuf>,
+        /// Skip prompts for comparisons performed without a receipt.
+        #[arg(long)]
+        non_interactive: bool,
+        /// Require every group to have a receipt or out-of-band confirmation.
+        #[arg(long)]
+        require_verification: bool,
         #[arg(long)]
         output: PathBuf,
     },
     Publish {
+        /// Collection ledger; --verified remains accepted for older commands.
+        #[arg(long, alias = "verified")]
+        collected: PathBuf,
+        /// Explicitly select the default requirement for complete verification.
+        #[arg(long, conflicts_with = "allow_unverified")]
+        require_verification: bool,
+        /// Allow publication with groups lacking receipts or out-of-band confirmations.
         #[arg(long)]
-        verified: PathBuf,
+        allow_unverified: bool,
         #[arg(long)]
         candidate: String,
         #[arg(long, value_enum)]
@@ -136,20 +150,32 @@ fn execute() -> Result<()> {
         Commands::Collect {
             candidate,
             receipts,
+            non_interactive,
+            require_verification,
             output,
-        } => candidates::collect(&process::root()?, &candidate, &receipts, &output),
+        } => candidates::collect(
+            &process::root()?,
+            &candidate,
+            receipts.as_deref(),
+            &output,
+            non_interactive,
+            require_verification,
+        ),
         Commands::Publish {
-            verified,
+            collected,
+            require_verification: _,
+            allow_unverified,
             candidate,
             destination,
             confirm,
             swift,
         } => publish::publish(
             &process::root()?,
-            &verified,
+            &collected,
             &candidate,
             destination,
             &confirm,
+            allow_unverified,
             &swift,
         ),
     }

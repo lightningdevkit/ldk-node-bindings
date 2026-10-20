@@ -41,11 +41,23 @@ impl Destination {
     }
 }
 #[derive(Deserialize, Serialize)]
+struct PublicationAttempt {
+    destination: String,
+    verification: VerificationCoverage,
+    allow_unverified: bool,
+}
+#[derive(Deserialize, Serialize)]
 struct Publication {
     schema: u32,
     candidate_id: String,
     candidate_sha256: String,
     destinations: BTreeMap<String, Value>,
+    // Preserve legacy coverage without attributing it to earlier destinations:
+    // old publishers overwrote this field on each invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification: Option<VerificationCoverage>,
+    #[serde(default)]
+    verification_history: Vec<PublicationAttempt>,
 }
 struct Session<'a> {
     candidate: &'a Candidate,
@@ -54,7 +66,8 @@ struct Session<'a> {
     state: Publication,
 }
 impl Session<'_> {
-    fn save(&mut self, destination: &str, value: Value) -> Result<()> {
+    fn save(&mut self, destination: &str, mut value: Value) -> Result<()> {
+        value["verification_attempt"] = json!(self.state.verification_history.len() - 1);
         self.state.destinations.insert(destination.into(), value);
         write_json(&self.state_path, &self.state)
     }
@@ -67,10 +80,11 @@ impl Session<'_> {
 }
 pub fn publish(
     root: &Path,
-    verified: &Path,
+    collected: &Path,
     source: &str,
     destination: Destination,
     confirm: &str,
+    allow_unverified: bool,
     swift_options: &SwiftOptions,
 ) -> Result<()> {
     ensure!(
@@ -91,7 +105,7 @@ pub fn publish(
         loaded.candidate.id == confirm,
         "candidate-specific confirmation does not match"
     );
-    let ledger: Verified = read_json(verified)?;
+    let ledger: Collected = read_json(collected)?;
     let c = &loaded.candidate;
     ensure!(
         ledger.schema == 1
@@ -99,9 +113,15 @@ pub fn publish(
             && ledger.recipe == c.recipe
             && ledger.inputs_sha256 == c.inputs_sha256
             && ledger.candidate_sha256 == hash_file(&loaded.dir.join("candidate.json"))?.sha256,
-        "verified ledger identity differs"
+        "collection ledger identity differs"
     );
-    validate_receipts(c, &ledger.receipts)?;
+    let coverage = validate_verification(c, &ledger.receipts, &ledger.out_of_band_groups, false)?;
+    coverage.report();
+    ensure!(
+        allow_unverified || coverage.unconfirmed_groups.is_empty(),
+        "missing verification for {}; record receipts or out-of-band comparisons, or explicitly pass --allow-unverified",
+        coverage.unconfirmed_groups.join(", ")
+    );
     let snapshot = tempfile::Builder::new()
         .prefix("bindings-publish-")
         .tempdir_in("/tmp")?;
@@ -111,7 +131,7 @@ pub fn publish(
             snapshot.path().join(&file.name),
         )?;
     }
-    let state_path = verified
+    let state_path = collected
         .parent()
         .unwrap_or(Path::new("."))
         .join(format!("publication-{}.json", c.id));
@@ -126,7 +146,7 @@ pub fn publish(
     publication_lock
         .try_lock()
         .context("another publication is using this candidate ledger; retry after it exits")?;
-    let state = if state_path.exists() {
+    let mut state = if state_path.exists() {
         let state: Publication = read_json(&state_path)?;
         ensure!(
             state.schema == 1
@@ -141,8 +161,15 @@ pub fn publish(
             candidate_id: c.id.clone(),
             candidate_sha256: ledger.candidate_sha256,
             destinations: BTreeMap::new(),
+            verification: None,
+            verification_history: Vec::new(),
         }
     };
+    state.verification_history.push(PublicationAttempt {
+        destination: destination.name().into(),
+        verification: coverage,
+        allow_unverified,
+    });
     let mut session = Session {
         candidate: c,
         dir: snapshot.path(),
@@ -150,6 +177,9 @@ pub fn publish(
         state,
     };
     session.rehash()?;
+    // Persist this attempt before any destination mutation, including the Swift
+    // metadata push. Retries append evidence instead of rewriting older claims.
+    write_json(&session.state_path, &session.state)?;
     match destination {
         Destination::Testpypi | Destination::Pypi => python(&mut session, destination)?,
         Destination::Maven => maven(&mut session)?,
